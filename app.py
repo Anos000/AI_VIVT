@@ -295,7 +295,10 @@ RESULTS = """
                 <strong>🕒 Прибытие:</strong><br>
                 {{ route.END_DATETIME.strftime('%d.%m.%Y %H:%M') }}
               </div>
+              <form method="get" action="{{ url_for('seats') }}">
+              <input type="hidden" name="schedule_id" value="{{ route.SCHEDULE_ID }}">
               <button class="btn btn-primary">Выбрать</button>
+            </form>
             </div>
           </div>
         </div>
@@ -312,6 +315,30 @@ RESULTS = """
   </div>
 </div>
 {% endif %}
+"""
+SEATS_TEMPLATE = """
+<div class="glass">
+  <h2 class="h5 mb-3">Выбор мест — рейс #{{ schedule_id }}</h2>
+  <form method="post" action="{{ url_for('seats_post', schedule_id=schedule_id) }}">
+    <div class="d-flex flex-wrap" style="gap:10px">
+      {% for seat in seats %}
+        <label class="border rounded px-3 py-2 {% if seat.STATUS!='FREE' %}bg-light text-muted{% endif %}"
+               style="min-width:70px;text-align:center">
+          <input type="checkbox" name="seat_ids" value="{{ seat.ID }}" {% if seat.STATUS!='FREE' %}disabled{% endif %}>
+          <div class="small">Ваг. {{ seat.COACH_NO }}</div>
+          <div class="fw-bold">{{ seat.SEAT_NO }}</div>
+          <div class="small">
+            {% if seat.STATUS=='FREE' %}свободно{% elif seat.STATUS=='HELD' %}бронь{% else %}куплено{% endif %}
+          </div>
+        </label>
+      {% endfor %}
+    </div>
+    <div class="mt-3">
+      <button class="btn btn-primary">Перейти к оплате</button>
+      <a class="btn btn-outline-secondary" href="{{ url_for('search_routes') }}">Назад к поиску</a>
+    </div>
+  </form>
+</div>
 """
 
 # ---------------- Валидация ----------------
@@ -375,6 +402,64 @@ def get_conn():
     except Exception as e:
         print(f"[DB][CONNECTION ERROR] {e}")
         raise
+def db_get_seats(schedule_id: int):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+          SELECT ID, SCHEDULE_ID, TRANSPORT_TYPE_ID, COACH_NO, SEAT_NO, STATUS
+          FROM SCHEDULE_SEATS
+          WHERE SCHEDULE_ID = :sid
+          ORDER BY COACH_NO, SEAT_NO
+        """, {"sid": schedule_id})
+        rows = cur.fetchall()
+        return [dict(zip([c[0] for c in cur.description], r)) for r in rows]
+
+def db_hold_seats(seat_ids: list[int]) -> int:
+    """Переводит FREE -> HELD для указанных мест. Возвращает число забронированных записей."""
+    if not seat_ids:
+        return 0
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.executemany("""
+          UPDATE SCHEDULE_SEATS
+          SET STATUS='HELD'
+          WHERE ID=:1 AND STATUS='FREE'
+        """, [(sid,) for sid in seat_ids])
+        updated = cur.rowcount
+        conn.commit()
+        return int(updated or 0)
+
+def db_create_order(user_login: str, schedule_id: int, seat_ids: list[int], per_seat_price: float) -> int:
+    """Создаёт заказ + позиции. Возвращает order_id."""
+    total = per_seat_price * len(seat_ids)
+    with get_conn() as conn:
+        cur = conn.cursor()
+        # вставка заказа с возвратом ID
+        oid = cur.var(oracledb.NUMBER)
+        cur.execute("""
+          INSERT INTO ORDERS(USER_LOGIN, SCHEDULE_ID, TOTAL_PRICE, STATUS)
+          VALUES (:u, :sid, :tot, 'NEW')
+          RETURNING ID INTO :oid
+        """, dict(u=user_login, sid=schedule_id, tot=total, oid=oid))
+        order_id = int(oid.getvalue())
+        # позиции заказа
+        cur.executemany("""
+          INSERT INTO ORDER_ITEMS(ORDER_ID, SEAT_ID, PRICE)
+          VALUES (:1, :2, :3)
+        """, [(order_id, sid, per_seat_price) for sid in seat_ids])
+        conn.commit()
+        return order_id
+
+def db_mark_order_paid(order_id: int) -> None:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE ORDERS SET STATUS='PAID' WHERE ID=:id", {"id": order_id})
+        cur.execute("""
+          UPDATE SCHEDULE_SEATS
+          SET STATUS='SOLD'
+          WHERE ID IN (SELECT SEAT_ID FROM ORDER_ITEMS WHERE ORDER_ID=:id)
+        """, {"id": order_id})
+        conn.commit()
 
 
 def init_db():
@@ -789,6 +874,81 @@ def search_routes():
     ) + render_template_string(RESULTS, routes=routes)
 
     return render_template_string(BASE, title="Поиск маршрутов", body=body_content)
+@app.get("/seats")
+def seats():
+    if not session.get("user_login"):
+        return redirect(url_for("login"))
+    try:
+        schedule_id = int(request.args.get("schedule_id") or 0)
+    except:
+        flash("Неверный рейс.", "danger")
+        return redirect(url_for("search_routes"))
+
+    seats = db_get_seats(schedule_id)
+    if not seats:
+        flash("Для этого рейса пока нет мест (проверь триггер/инициализацию).", "warning")
+        return redirect(url_for("search_routes"))
+
+    body = render_template_string(SEATS_TEMPLATE, seats=seats, schedule_id=schedule_id)
+    return render_template_string(BASE, title="Выбор мест", body=body)
+
+
+@app.post("/seats/<int:schedule_id>")
+def seats_post(schedule_id: int):
+    if not session.get("user_login"):
+        return redirect(url_for("login"))
+    # список выбранных ID мест
+    raw_ids = request.form.getlist("seat_ids")
+    seat_ids = [int(s) for s in raw_ids if s.isdigit()]
+    if not seat_ids:
+        flash("Выберите хотя бы одно место.", "warning")
+        return redirect(url_for("seats") + f"?schedule_id={schedule_id}")
+
+    # фиксируем бронь
+    updated = db_hold_seats(seat_ids)
+    if updated < len(seat_ids):
+        flash("Часть мест уже была занята. Обновил схему — выбери свободные ещё раз.", "warning")
+        return redirect(url_for("seats") + f"?schedule_id={schedule_id}")
+
+    # получим цену за место = TOTAL_PRICE из route_schedule (твой поиск уже этим оперирует)
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT TOTAL_PRICE FROM ROUTE_SCHEDULE WHERE SCHEDULE_ID=:sid", {"sid": schedule_id})
+        row = cur.fetchone()
+    if not row:
+        flash("Рейс не найден.", "danger")
+        return redirect(url_for("search_routes"))
+
+    per_seat_price = float(row[0])  # простая модель: цена за 1 место = TOTAL_PRICE
+    order_id = db_create_order(session["user_login"], schedule_id, seat_ids, per_seat_price)
+    return redirect(url_for("checkout", order_id=order_id))
+
+
+@app.get("/checkout/<int:order_id>")
+def checkout(order_id: int):
+    if not session.get("user_login"):
+        return redirect(url_for("login"))
+    # можно подтянуть состав корзины для показа (сумма/места), но для краткости просто кнопка "Оплатить"
+    body = f"""
+    <div class="glass">
+      <h2 class="h5 mb-3">Оплата заказа #{order_id}</h2>
+      <p>Демо-режим: оплаты нет. Нажми «Оплатить» — зафиксируем покупку и места станут SOLD.</p>
+      <form method="post" action="{{{{ url_for('pay_order', order_id={order_id}) }}}}">
+        <button class="btn btn-primary">Оплатить</button>
+        <a class="btn btn-outline-secondary" href="{{{{ url_for('search_routes') }}}}">Назад к поиску</a>
+      </form>
+    </div>
+    """
+    return render_template_string(BASE, title="Оплата", body=body)
+
+
+@app.post("/checkout/<int:order_id>/pay")
+def pay_order(order_id: int):
+    if not session.get("user_login"):
+        return redirect(url_for("login"))
+    db_mark_order_paid(order_id)
+    flash(f"Заказ #{order_id} оплачен. Спасибо!", "success")
+    return redirect(url_for("search_routes"))
 
 
 # ---------------- Инициализация при запуске ----------------
