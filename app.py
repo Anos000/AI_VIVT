@@ -319,20 +319,58 @@ RESULTS = """
 SEATS_TEMPLATE = """
 <div class="glass">
   <h2 class="h5 mb-3">Выбор мест — рейс #{{ schedule_id }}</h2>
+
+  <!-- Переключатели вагонов -->
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <a class="btn btn-outline-secondary {% if coach<=1 %}disabled{% endif %}"
+       href="{{ url_for('seats') }}?schedule_id={{ schedule_id }}&coach={{ coach-1 }}">◀ Вагон {{ coach-1 }}</a>
+
+    <div>
+      {% for c in range(1, 11) %}
+        <a class="btn btn-sm {% if c==coach %}btn-primary{% else %}btn-outline-primary{% endif %} me-1"
+           href="{{ url_for('seats') }}?schedule_id={{ schedule_id }}&coach={{ c }}">{{ c }}</a>
+      {% endfor %}
+    </div>
+
+    <a class="btn btn-outline-secondary {% if coach>=10 %}disabled{% endif %}"
+       href="{{ url_for('seats') }}?schedule_id={{ schedule_id }}&coach={{ coach+1 }}">Вагон {{ coach+1 }} ▶</a>
+  </div>
+
   <form method="post" action="{{ url_for('seats_post', schedule_id=schedule_id) }}">
-    <div class="d-flex flex-wrap" style="gap:10px">
-      {% for seat in seats %}
-        <label class="border rounded px-3 py-2 {% if seat.STATUS!='FREE' %}bg-light text-muted{% endif %}"
-               style="min-width:70px;text-align:center">
+    <!-- легенда -->
+    <div class="text-muted small mb-2">Схема (вид сверху): 2 места — коридор — 2 места</div>
+
+    <!-- сетка вагона: 5 колонок (2 места + коридор + 2 места), 5 рядов (итого 20 мест) -->
+    <div class="border rounded p-3"
+         style="display:grid;grid-template-columns:repeat(5, 68px);gap:10px;align-items:center">
+
+      <!-- заголовок колонок -->
+      <div class="text-muted small text-center">Л</div>
+      <div class="text-muted small text-center">Л</div>
+      <div class="text-muted small text-center">кор</div>
+      <div class="text-muted small text-center">П</div>
+      <div class="text-muted small text-center">П</div>
+
+      {% for sn in range(1,21) %}
+        {% set row = ((sn-1)//4)+1 %}
+        {% set pos = ((sn-1)%4)+1 %}
+        {% set gridcol = 1 if pos==1 else (2 if pos==2 else (4 if pos==3 else 5)) %}
+        {% set seat = (coach_seats|selectattr('SEAT_NO','equalto', sn)|list)|first %}
+        <label class="border rounded px-2 py-2 {% if seat.STATUS!='FREE' %}bg-light text-muted{% endif %}"
+               style="grid-column: {{gridcol}}; text-align:center">
           <input type="checkbox" name="seat_ids" value="{{ seat.ID }}" {% if seat.STATUS!='FREE' %}disabled{% endif %}>
-          <div class="small">Ваг. {{ seat.COACH_NO }}</div>
-          <div class="fw-bold">{{ seat.SEAT_NO }}</div>
+          <div class="small">Ряд {{ row }}</div>
+          <div class="fw-bold">{{ sn }}</div>
           <div class="small">
             {% if seat.STATUS=='FREE' %}свободно{% elif seat.STATUS=='HELD' %}бронь{% else %}куплено{% endif %}
           </div>
         </label>
+        {% if pos==2 %}
+          <div></div> <!-- пустая ячейка под коридор в колонке 3 -->
+        {% endif %}
       {% endfor %}
     </div>
+
     <div class="mt-3">
       <button class="btn btn-primary">Перейти к оплате</button>
       <a class="btn btn-outline-secondary" href="{{ url_for('search_routes') }}">Назад к поиску</a>
@@ -340,6 +378,7 @@ SEATS_TEMPLATE = """
   </form>
 </div>
 """
+
 
 # ---------------- Валидация ----------------
 LOGIN_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
@@ -884,12 +923,28 @@ def seats():
         flash("Неверный рейс.", "danger")
         return redirect(url_for("search_routes"))
 
+    # какой вагон показываем (1..10)
+    try:
+        coach = int(request.args.get("coach") or 1)
+    except:
+        coach = 1
+    coach = max(1, min(10, coach))
+
     seats = db_get_seats(schedule_id)
     if not seats:
         flash("Для этого рейса пока нет мест (проверь триггер/инициализацию).", "warning")
         return redirect(url_for("search_routes"))
 
-    body = render_template_string(SEATS_TEMPLATE, seats=seats, schedule_id=schedule_id)
+    # фильтруем места текущего вагона
+    coach_seats = [s for s in seats if int(s["COACH_NO"]) == coach]
+
+    body = render_template_string(
+        SEATS_TEMPLATE,
+        seats=seats,            # оставим на всякий случай
+        coach_seats=coach_seats,
+        coach=coach,
+        schedule_id=schedule_id
+    )
     return render_template_string(BASE, title="Выбор мест", body=body)
 
 
