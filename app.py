@@ -781,9 +781,12 @@ def search_routes():
             if not routes:
                 flash("По вашему запросу маршруты не найдены", "info")
 
-    body_content = render_template_string(SEARCH_FORM, cities=cities, today=datetime.now().strftime('%Y-%m-%d'))
-    if request.method == "POST":
-        body_content += render_template_string(RESULTS, routes=routes)
+    # Всегда передаем routes в шаблон, даже если они пустые
+    body_content = render_template_string(
+        SEARCH_FORM,
+        cities=cities,
+        today=datetime.now().strftime('%Y-%m-%d')
+    ) + render_template_string(RESULTS, routes=routes)
 
     return render_template_string(BASE, title="Поиск маршрутов", body=body_content)
 
