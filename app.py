@@ -20,8 +20,14 @@ def as_aware_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+def is_admin():
+    return session.get("user_role") == "ADMIN"
 
-
+def admin_required():
+    if not is_admin():
+        flash("Требуется вход администратора.", "danger")
+        return redirect(url_for("login"))
+    return None
 # грузим .env из папки файла (надёжно для Windows)
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -79,19 +85,28 @@ BASE = """
       <a class="navbar-brand fw-bold" href="{{ url_for('search_routes') }}">🚌 Система маршрутов</a>
 
       {% if session.get('user_login') %}
-      <div class="dropdown">
-        <button class="btn btn-outline-secondary dropdown-toggle" type="button"
-                id="userMenu" data-bs-toggle="dropdown" aria-expanded="false">
-          {{ session['user_login'] }}
-        </button>
-        <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="userMenu">
-          <li><h6 class="dropdown-header">Мой профиль</h6></li>
-          <li><a class="dropdown-item" href="#">🧾 Мои покупки</a></li>
-          <li><a class="dropdown-item" href="#">🔔 Уведомления</a></li>
-          <li><a class="dropdown-item" href="#">🎟 Запрос на скидку</a></li>
-          <li><hr class="dropdown-divider"></li>
-          <li><a class="dropdown-item" href="{{ url_for('logout') }}">🚪 Выход</a></li>
-        </ul>
+      <div class="d-flex align-items-center">
+        {% if session.get('user_role') == 'ADMIN' %}
+          <a class="btn btn-sm btn-outline-primary me-2" href="{{ url_for('admin_dashboard') }}">Админка</a>
+        {% endif %}
+
+        <div class="dropdown">
+          <button class="btn btn-outline-secondary dropdown-toggle" type="button"
+                  id="userMenu" data-bs-toggle="dropdown" aria-expanded="false">
+            {{ session['user_login'] }}
+            {% if session.get('user_role')=='ADMIN' %}
+              <span class="badge text-bg-warning ms-1">admin</span>
+            {% endif %}
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="userMenu">
+            <li><h6 class="dropdown-header">Мой профиль</h6></li>
+            <li><a class="dropdown-item" href="#">🧾 Мои покупки</a></li>
+            <li><a class="dropdown-item" href="#">🔔 Уведомления</a></li>
+            <li><a class="dropdown-item" href="#">🎟 Запрос на скидку</a></li>
+            <li><hr class="dropdown-divider"></li>
+            <li><a class="dropdown-item" href="{{ url_for('logout') }}">🚪 Выход</a></li>
+          </ul>
+        </div>
       </div>
       {% else %}
         <a class="btn btn-outline-primary" href="{{ url_for('login') }}">Войти</a>
@@ -116,6 +131,74 @@ BASE = """
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
+"""
+ADMIN_TMPL = """
+<div class="glass">
+  <h2 class="h5 mb-3">Админ-панель</h2>
+
+  <ul class="nav nav-tabs mb-3" role="tablist">
+    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#orders">Оплаты к проверке</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#discounts">Заявки на скидку</a></li>
+  </ul>
+
+  <div class="tab-content">
+    <div class="tab-pane fade show active" id="orders">
+      {% if orders %}
+      <div class="list-group">
+        {% for o in orders %}
+          <div class="list-group-item d-flex justify-content-between align-items-center">
+            <div>
+              <div class="fw-bold">Заказ #{{ o.ID }} — {{ o.USER_LOGIN }}</div>
+              <div class="text-muted small">Сумма: {{ o.TOTAL_PRICE }} ₽ · Рейс: {{ o.SCHEDULE_ID }} · {{ o.CREATED_AT }}</div>
+            </div>
+            <div class="d-flex gap-2">
+              <form method="post" action="{{ url_for('admin_mark_paid', order_id=o.ID) }}">
+                <button class="btn btn-success btn-sm">Подтвердить оплату</button>
+              </form>
+              <form method="post" action="{{ url_for('admin_cancel_order', order_id=o.ID) }}">
+                <button class="btn btn-outline-danger btn-sm">Отменить</button>
+              </form>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+      {% else %}
+        <div class="text-muted">Нет заказов в статусе NEW.</div>
+      {% endif %}
+    </div>
+
+    <div class="tab-pane fade" id="discounts">
+      {% if requests %}
+      <div class="list-group">
+        {% for r in requests %}
+          <div class="list-group-item">
+            <div class="d-flex justify-content-between">
+              <div>
+                <div class="fw-bold">Заявка #{{ r.ID }} — {{ r.USER_LOGIN }}</div>
+                <div class="small text-muted">{{ r.CREATED_AT }}</div>
+                <div class="mt-1">{{ r.MESSAGE or "—" }}</div>
+              </div>
+              <div class="d-flex align-items-center gap-2">
+                <form method="post" action="{{ url_for('admin_discount_decide', req_id=r.ID) }}">
+                  <input type="hidden" name="action" value="approve">
+                  <input type="number" name="percent" class="form-control form-control-sm" placeholder="%" min="1" max="90" style="width:80px">
+                  <button class="btn btn-success btn-sm">Одобрить</button>
+                </form>
+                <form method="post" action="{{ url_for('admin_discount_decide', req_id=r.ID) }}">
+                  <input type="hidden" name="action" value="reject">
+                  <button class="btn btn-outline-danger btn-sm">Отклонить</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+      {% else %}
+        <div class="text-muted">Нет заявок в статусе PENDING.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
 """
 
 INDEX = """
@@ -656,10 +739,10 @@ def db_get_user_by_login(login: str):
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("""
-            SELECT LOGIN, EMAIL, PASSWORD_HASH, VERIFIED_AT
-            FROM USERS
-            WHERE LOGIN = :l AND VERIFIED_AT IS NOT NULL
-        """, {"l": login})
+                    SELECT LOGIN, EMAIL, PASSWORD_HASH, VERIFIED_AT, ROLE
+                   FROM USERS
+                    WHERE LOGIN = :l AND VERIFIED_AT IS NOT NULL
+                """, {"l": login})
         row = cur.fetchone()
         if not row:
             return None
@@ -668,6 +751,7 @@ def db_get_user_by_login(login: str):
             "email": row[1],
             "password_hash": row[2],
             "verified_at": row[3],
+            "role": row[4],
         }
 
 
@@ -733,7 +817,76 @@ def search_routes_db(from_city_id, to_city_id, travel_date, category):
 def generate_code() -> str:
     return f"{secrets.randbelow(900000) + 100000:06d}"
 
+@app.get("/admin")
+def admin_dashboard():
+    guard = admin_required()
+    if guard: return guard
+    with get_conn() as conn:
+        cur=conn.cursor()
+        cur.execute("""
+          SELECT ID, USER_LOGIN, SCHEDULE_ID, TOTAL_PRICE, STATUS, CREATED_AT
+          FROM ORDERS
+          WHERE STATUS='NEW'
+          ORDER BY CREATED_AT DESC
+        """)
+        orders = [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
+        cur.execute("""
+          SELECT ID, USER_LOGIN, MESSAGE, PERCENT, STATUS, CREATED_AT
+          FROM DISCOUNT_REQUESTS
+          WHERE STATUS='PENDING'
+          ORDER BY CREATED_AT DESC
+        """)
+        requests = [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
+    body = render_template_string(ADMIN_TMPL, orders=orders, requests=requests)
+    return render_template_string(BASE, title="Админ-панель", body=body)
 
+@app.post("/admin/orders/<int:order_id>/paid")
+def admin_mark_paid(order_id:int):
+    guard = admin_required()
+    if guard: return guard
+    db_mark_order_paid(order_id)  # у тебя уже есть эта функция
+    flash(f"Заказ #{order_id} помечен как оплачен. Места зафиксированы.", "success")
+    return redirect(url_for("admin_dashboard"))
+
+@app.post("/admin/orders/<int:order_id>/cancel")
+def admin_cancel_order(order_id:int):
+    guard = admin_required()
+    if guard: return guard
+    with get_conn() as conn:
+        cur=conn.cursor()
+        cur.execute("""
+          UPDATE SCHEDULE_SEATS SET STATUS='FREE'
+          WHERE ID IN (SELECT SEAT_ID FROM ORDER_ITEMS WHERE ORDER_ID=:id)
+        """, {"id": order_id})
+        cur.execute("UPDATE ORDERS SET STATUS='CANCELED' WHERE ID=:id", {"id": order_id})
+        conn.commit()
+    flash(f"Заказ #{order_id} отменён, места освобождены.", "info")
+    return redirect(url_for("admin_dashboard"))
+
+@app.post("/admin/discounts/<int:req_id>/decide")
+def admin_discount_decide(req_id:int):
+    guard = admin_required()
+    if guard: return guard
+    action  = request.form.get("action")
+    percent = request.form.get("percent")
+    with get_conn() as conn:
+        cur=conn.cursor()
+        if action == "approve":
+            pct = int(percent or 0)
+            cur.execute("""
+              UPDATE DISCOUNT_REQUESTS
+              SET STATUS='APPROVED', PERCENT=:p, REVIEWED_AT=SYSTIMESTAMP
+              WHERE ID=:id
+            """, {"p": pct, "id": req_id})
+        else:
+            cur.execute("""
+              UPDATE DISCOUNT_REQUESTS
+              SET STATUS='REJECTED', REVIEWED_AT=SYSTIMESTAMP
+              WHERE ID=:id
+            """, {"id": req_id})
+        conn.commit()
+    flash("Решение по заявке сохранено.", "success")
+    return redirect(url_for("admin_dashboard"))
 # ---------------- Маршруты регистрации/входа ----------------
 @app.get("/")
 def index():
@@ -892,8 +1045,14 @@ def login():
         return render_template_string(BASE, title="Вход", body=render_template_string(LOGIN_FORM, f={"login": login_}))
 
     session["user_login"] = user["login"]
+    session["user_role"] = user.get("role") or "CLIENT"
     flash("Вы успешно вошли.", "success")
-    return redirect(url_for("search_routes"))
+      # Единая развилка по роли:
+
+    if session["user_role"] == "ADMIN":
+        return redirect(url_for("admin_dashboard"))
+    else:
+        return redirect(url_for("search_routes"))
 
 
 @app.get("/logout")
