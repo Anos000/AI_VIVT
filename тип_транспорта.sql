@@ -21,3 +21,6 @@ UPDATE transport_type SET speed_kmph = 120, price_per_km = 15 WHERE id = 3; -- P
 
 	SELECT *
 	FROM transport_type
+	
+SELECT *
+FROM users

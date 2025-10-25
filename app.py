@@ -72,17 +72,32 @@ BASE = """
   </style>
 </head>
 <body>
-  {% if session.get('user_login') %}
-  <nav class="navbar navbar-expand-lg navbar-light bg-light rounded mb-4">
-    <div class="container-fluid">
-      <a class="navbar-brand" href="{{ url_for('search_routes') }}">🚌 Система маршрутов</a>
-      <div class="navbar-nav ms-auto">
-        <span class="navbar-text me-3">Привет, <b>{{ session.get('user_login', 'Гость') }}</b></span>
-        <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('logout') }}">Выйти</a>
+
+  <!-- NAVBAR: всегда показываем; справа либо dropdown пользователя, либо кнопка Войти -->
+  <nav class="navbar navbar-light bg-light rounded mb-4">
+    <div class="container d-flex justify-content-between align-items-center">
+      <a class="navbar-brand fw-bold" href="{{ url_for('search_routes') }}">🚌 Система маршрутов</a>
+
+      {% if session.get('user_login') %}
+      <div class="dropdown">
+        <button class="btn btn-outline-secondary dropdown-toggle" type="button"
+                id="userMenu" data-bs-toggle="dropdown" aria-expanded="false">
+          {{ session['user_login'] }}
+        </button>
+        <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="userMenu">
+          <li><h6 class="dropdown-header">Мой профиль</h6></li>
+          <li><a class="dropdown-item" href="#">🧾 Мои покупки</a></li>
+          <li><a class="dropdown-item" href="#">🔔 Уведомления</a></li>
+          <li><a class="dropdown-item" href="#">🎟 Запрос на скидку</a></li>
+          <li><hr class="dropdown-divider"></li>
+          <li><a class="dropdown-item" href="{{ url_for('logout') }}">🚪 Выход</a></li>
+        </ul>
       </div>
+      {% else %}
+        <a class="btn btn-outline-primary" href="{{ url_for('login') }}">Войти</a>
+      {% endif %}
     </div>
   </nav>
-  {% endif %}
 
   <main class="container">
     {% with msgs = get_flashed_messages(with_categories=true) %}
@@ -96,6 +111,9 @@ BASE = """
     {% endwith %}
     {{ body|safe }}
   </main>
+
+  <!-- Нужен для работы dropdown -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
 """
@@ -318,16 +336,16 @@ RESULTS = """
 """
 SEATS_TEMPLATE = """
 <div class="glass">
-  <h2 class="h5 mb-3">Выбор мест — рейс #{{ schedule_id }}</h2>
+  <h2 class="h5 mb-3 text-center">Выбор мест — рейс #{{ schedule_id }}</h2>
 
   <!-- Переключатели вагонов -->
   <div class="d-flex align-items-center justify-content-between mb-3">
     <a class="btn btn-outline-secondary {% if coach<=1 %}disabled{% endif %}"
        href="{{ url_for('seats') }}?schedule_id={{ schedule_id }}&coach={{ coach-1 }}">◀ Вагон {{ coach-1 }}</a>
 
-    <div>
+    <div class="d-flex justify-content-center flex-wrap" style="gap:6px">
       {% for c in range(1, 11) %}
-        <a class="btn btn-sm {% if c==coach %}btn-primary{% else %}btn-outline-primary{% endif %} me-1"
+        <a class="btn btn-sm {% if c==coach %}btn-primary{% else %}btn-outline-primary{% endif %}"
            href="{{ url_for('seats') }}?schedule_id={{ schedule_id }}&coach={{ c }}">{{ c }}</a>
       {% endfor %}
     </div>
@@ -338,46 +356,49 @@ SEATS_TEMPLATE = """
 
   <form method="post" action="{{ url_for('seats_post', schedule_id=schedule_id) }}">
     <!-- легенда -->
-    <div class="text-muted small mb-2">Схема (вид сверху): 2 места — коридор — 2 места</div>
+    <div class="text-muted small mb-2 text-center">Схема (вид сверху): 2 места — коридор — 2 места</div>
 
-    <!-- сетка вагона: 5 колонок (2 места + коридор + 2 места), 5 рядов (итого 20 мест) -->
-    <div class="border rounded p-3"
-         style="display:grid;grid-template-columns:repeat(5, 68px);gap:10px;align-items:center">
+    <!-- сетка вагона (по центру): 5 колонок (2 места + коридор + 2 места), 5 рядов (итого 20 мест) -->
+    <div class="d-flex justify-content-center">
+      <div class="border rounded p-3"
+           style="display:grid;grid-template-columns:repeat(5, 68px);gap:10px;align-items:center;width:max-content;margin:0 auto">
 
-      <!-- заголовок колонок -->
-      <div class="text-muted small text-center">Л</div>
-      <div class="text-muted small text-center">Л</div>
-      <div class="text-muted small text-center">кор</div>
-      <div class="text-muted small text-center">П</div>
-      <div class="text-muted small text-center">П</div>
+        <!-- заголовок колонок -->
+        <div class="text-muted small text-center">Л</div>
+        <div class="text-muted small text-center">Л</div>
+        <div class="text-muted small text-center">кор</div>
+        <div class="text-muted small text-center">П</div>
+        <div class="text-muted small text-center">П</div>
 
-      {% for sn in range(1,21) %}
-        {% set row = ((sn-1)//4)+1 %}
-        {% set pos = ((sn-1)%4)+1 %}
-        {% set gridcol = 1 if pos==1 else (2 if pos==2 else (4 if pos==3 else 5)) %}
-        {% set seat = (coach_seats|selectattr('SEAT_NO','equalto', sn)|list)|first %}
-        <label class="border rounded px-2 py-2 {% if seat.STATUS!='FREE' %}bg-light text-muted{% endif %}"
-               style="grid-column: {{gridcol}}; text-align:center">
-          <input type="checkbox" name="seat_ids" value="{{ seat.ID }}" {% if seat.STATUS!='FREE' %}disabled{% endif %}>
-          <div class="small">Ряд {{ row }}</div>
-          <div class="fw-bold">{{ sn }}</div>
-          <div class="small">
-            {% if seat.STATUS=='FREE' %}свободно{% elif seat.STATUS=='HELD' %}бронь{% else %}куплено{% endif %}
-          </div>
-        </label>
-        {% if pos==2 %}
-          <div></div> <!-- пустая ячейка под коридор в колонке 3 -->
-        {% endif %}
-      {% endfor %}
+        {% for sn in range(1,21) %}
+          {% set row = ((sn-1)//4)+1 %}
+          {% set pos = ((sn-1)%4)+1 %}
+          {% set gridcol = 1 if pos==1 else (2 if pos==2 else (4 if pos==3 else 5)) %}
+          {% set seat = (coach_seats|selectattr('SEAT_NO','equalto', sn)|list)|first %}
+          <label class="border rounded px-2 py-2 {% if seat.STATUS!='FREE' %}bg-light text-muted{% endif %}"
+                 style="grid-column: {{gridcol}}; text-align:center">
+            <input type="checkbox" name="seat_ids" value="{{ seat.ID }}" {% if seat.STATUS!='FREE' %}disabled{% endif %}>
+            <div class="small">Ряд {{ row }}</div>
+            <div class="fw-bold">{{ sn }}</div>
+            <div class="small">
+              {% if seat.STATUS=='FREE' %}свободно{% elif seat.STATUS=='HELD' %}бронь{% else %}куплено{% endif %}
+            </div>
+          </label>
+          {% if pos==2 %}
+            <div></div> <!-- коридор: пустая колонка 3 -->
+          {% endif %}
+        {% endfor %}
+      </div>
     </div>
 
-    <div class="mt-3">
+    <div class="mt-3 d-flex gap-2 justify-content-center">
       <button class="btn btn-primary">Перейти к оплате</button>
       <a class="btn btn-outline-secondary" href="{{ url_for('search_routes') }}">Назад к поиску</a>
     </div>
   </form>
 </div>
 """
+
 
 
 # ---------------- Валидация ----------------
@@ -506,18 +527,20 @@ def init_db():
     print("[DB] Initializing database...")
     ddl_users = """
     CREATE TABLE USERS (
-      ID NUMBER GENERATED BY DEFAULT ON NULL AS IDENTITY,
-      LOGIN         VARCHAR2(64)  NOT NULL,
-      EMAIL         VARCHAR2(254) NOT NULL,
-      PASSWORD_HASH VARCHAR2(255) NOT NULL,
-      VERIFIED_AT   TIMESTAMP WITH TIME ZONE NULL,
-      VERIFICATION_CODE VARCHAR2(8) NULL,
-      CODE_EXPIRES_AT TIMESTAMP WITH TIME ZONE NULL,
-      VERIFICATION_ATTEMPTS NUMBER DEFAULT 0 NOT NULL,
-      CONSTRAINT PK_USERS PRIMARY KEY (ID),
-      CONSTRAINT UQ_USERS_LOGIN UNIQUE (LOGIN),
-      CONSTRAINT UQ_USERS_EMAIL UNIQUE (EMAIL)
-    )
+  ID NUMBER GENERATED BY DEFAULT ON NULL AS IDENTITY,
+  LOGIN         VARCHAR2(64)  NOT NULL,
+  EMAIL         VARCHAR2(254) NOT NULL,
+  PASSWORD_HASH VARCHAR2(255) NOT NULL,
+  ROLE          VARCHAR2(16)  DEFAULT 'CLIENT' NOT NULL,
+  VERIFIED_AT   TIMESTAMP WITH TIME ZONE NULL,
+  VERIFICATION_CODE   VARCHAR2(8) NULL,
+  CODE_EXPIRES_AT     TIMESTAMP WITH TIME ZONE NULL,
+  VERIFICATION_ATTEMPTS NUMBER DEFAULT 0 NOT NULL,
+  CONSTRAINT PK_USERS PRIMARY KEY (ID),
+  CONSTRAINT UQ_USERS_LOGIN UNIQUE (LOGIN),
+  CONSTRAINT UQ_USERS_EMAIL UNIQUE (EMAIL),
+  CONSTRAINT CK_USERS_ROLE CHECK (ROLE IN ('CLIENT','ADMIN'))
+)
     """
     try:
         with get_conn() as conn:
