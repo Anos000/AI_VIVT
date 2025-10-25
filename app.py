@@ -102,7 +102,7 @@ BASE = """
             <li><h6 class="dropdown-header">Мой профиль</h6></li>
             <li><a class="dropdown-item" href="#">🧾 Мои покупки</a></li>
             <li><a class="dropdown-item" href="#">🔔 Уведомления</a></li>
-            <li><a class="dropdown-item" href="#">🎟 Запрос на скидку</a></li>
+            <li><a class="dropdown-item" href="{{ url_for('discount_request') }}">🎟 Запрос на скидку</a></li>
             <li><hr class="dropdown-divider"></li>
             <li><a class="dropdown-item" href="{{ url_for('logout') }}">🚪 Выход</a></li>
           </ul>
@@ -132,6 +132,161 @@ BASE = """
 </body>
 </html>
 """
+
+DISCOUNT_REQUEST_FORM = """
+<div class="glass" style="max-width:720px;margin:0 auto">
+  <h2 class="h5 mb-3">Запрос на скидку</h2>
+  <form method="post" enctype="multipart/form-data">
+    <div class="mb-3">
+      <label class="form-label">Опишите причину (необязательно)</label>
+      <textarea class="form-control" name="message" rows="4" maxlength="1000"
+                placeholder="Например: студент, многодетная семья, корпоративный клиент и т.д."></textarea>
+      <div class="form-text">до 1000 символов</div>
+    </div>
+    <div class="mb-3">
+      <label class="form-label">Вложения (необязательно)</label>
+      <input class="form-control" type="file" name="files" multiple>
+      <div class="form-text">Можно прикрепить любые документы/изображения. Максимум ~15 МБ каждый.</div>
+    </div>
+    <div class="d-flex gap-2">
+      <button class="btn btn-primary">Отправить запрос</button>
+      <a class="btn btn-outline-secondary" href="{{ url_for('search_routes') }}">Назад</a>
+    </div>
+  </form>
+</div>
+"""
+app.config["MAX_CONTENT_LENGTH"] = 15 * 1024 * 1024  # ~15 МБ/файл
+
+@app.get("/discount/request")
+def discount_request():
+    if not session.get("user_login"):
+        return redirect(url_for("login"))
+    return render_template_string(BASE, title="Запрос на скидку", body=DISCOUNT_REQUEST_FORM)
+
+@app.post("/discount/request")
+def discount_request_post():
+    if not session.get("user_login"):
+        return redirect(url_for("login"))
+    user = session["user_login"]
+    msg  = (request.form.get("message") or "").strip()
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        rid = cur.var(oracledb.NUMBER)
+        cur.execute("""
+          INSERT INTO DISCOUNT_REQUESTS (USER_LOGIN, MESSAGE, STATUS)
+          VALUES (:u, :m, 'PENDING')
+          RETURNING ID INTO :rid
+        """, {"u": user, "m": msg, "rid": rid})
+
+        # ВАЖНО: в oracledb var.getvalue() -> [<NUMBER>], берём первый элемент
+        request_id = int(rid.getvalue()[0])
+
+        # чтобы надёжно писать BLOB-ы:
+        cur.setinputsizes(blob=oracledb.BLOB)
+
+        files = request.files.getlist("files")
+        for f in files or []:
+            if not f or not f.filename:
+                continue
+            data = f.read()
+            cur.execute("""
+              INSERT INTO DISCOUNT_REQUEST_FILES (REQUEST_ID, FILENAME, MIMETYPE, SIZE_BYTES, CONTENT)
+              VALUES (:r, :fn, :mt, :sz, :blob)
+            """, {
+              "r": request_id,
+              "fn": f.filename[:255],
+              "mt": (f.mimetype or "")[:128],
+              "sz": len(data),
+              "blob": data
+            })
+        conn.commit()
+
+    flash("Запрос отправлен. Мы уведомим вас после рассмотрения.", "success")
+    return redirect(url_for("search_routes"))
+
+ADMIN_DISCOUNT_VIEW = """
+<div class="glass">
+  <h2 class="h5 mb-3">Заявка #{{ r.ID }} — {{ r.USER_LOGIN }}</h2>
+  <div class="mb-3 text-muted small">Создана: {{ r.CREATED_AT }} {% if r.READ_AT %}· Прочитана: {{ r.READ_AT }}{% endif %}</div>
+  <h6>Сообщение</h6>
+  <div class="border rounded p-3 mb-3" style="white-space:pre-wrap">{{ r.MESSAGE or "—" }}</div>
+  <h6>Вложения</h6>
+  {% if files %}
+    <ul class="list-group mb-3">
+      {% for f in files %}
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <div><b>{{ f.FILENAME }}</b> <span class="text-muted small">({{ f.MIMETYPE or "file" }}, {{ f.SIZE_BYTES or 0 }} байт)</span></div>
+          <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin_discount_file', file_id=f.ID) }}">Скачать</a>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <div class="text-muted mb-3">Нет вложений.</div>
+  {% endif %}
+  <div class="d-flex gap-2">
+    <form method="post" action="{{ url_for('admin_discount_decide', req_id=r.ID) }}">
+      <input type="hidden" name="action" value="approve">
+      <input type="number" name="percent" class="form-control" placeholder="% скидки" min="1" max="90" style="width:140px">
+      <button class="btn btn-success">Одобрить</button>
+    </form>
+    <form method="post" action="{{ url_for('admin_discount_decide', req_id=r.ID) }}">
+      <input type="hidden" name="action" value="reject">
+      <button class="btn btn-outline-danger">Отклонить</button>
+    </form>
+    <a class="btn btn-outline-secondary" href="{{ url_for('admin_dashboard') }}">Назад</a>
+  </div>
+</div>
+"""
+
+@app.get("/admin/discounts/<int:req_id>")
+def admin_discount_view(req_id:int):
+    guard = admin_required()
+    if guard: return guard
+    with get_conn() as conn:
+        cur=conn.cursor()
+        cur.execute("""
+          SELECT ID, USER_LOGIN, MESSAGE, STATUS, CREATED_AT, READ_AT
+          FROM DISCOUNT_REQUESTS WHERE ID=:id
+        """, {"id": req_id})
+        r = cur.fetchone()
+        if not r:
+            flash("Заявка не найдена.", "warning")
+            return redirect(url_for("admin_dashboard"))
+        rec = dict(zip([c[0] for c in cur.description], r))
+        # пометить прочитанной
+        if not rec.get("READ_AT"):
+            cur.execute("UPDATE DISCOUNT_REQUESTS SET READ_AT=SYSTIMESTAMP WHERE ID=:id", {"id": req_id})
+            conn.commit()
+            rec["READ_AT"] = "только что"
+
+        cur.execute("""
+          SELECT ID, FILENAME, MIMETYPE, SIZE_BYTES, UPLOADED_AT
+          FROM DISCOUNT_REQUEST_FILES
+          WHERE REQUEST_ID=:id
+          ORDER BY ID
+        """, {"id": req_id})
+        files = [dict(zip([c[0] for c in cur.description], x)) for x in cur.fetchall()]
+    body = render_template_string(ADMIN_DISCOUNT_VIEW, r=rec, files=files)
+    return render_template_string(BASE, title=f"Заявка #{req_id}", body=body)
+
+@app.get("/admin/discounts/file/<int:file_id>")
+def admin_discount_file(file_id:int):
+    guard = admin_required()
+    if guard: return guard
+    with get_conn() as conn:
+        cur=conn.cursor()
+        cur.execute("SELECT FILENAME, MIMETYPE, CONTENT FROM DISCOUNT_REQUEST_FILES WHERE ID=:id", {"id": file_id})
+        row = cur.fetchone()
+        if not row:
+            flash("Файл не найден.", "warning")
+            return redirect(url_for("admin_dashboard"))
+        filename, mimetype, content = row[0], (row[1] or "application/octet-stream"), row[2].read()
+    from io import BytesIO
+    from flask import send_file
+    return send_file(BytesIO(content), mimetype=mimetype, as_attachment=True, download_name=filename)
+
+
 ADMIN_TMPL = """
 <div class="glass">
   <h2 class="h5 mb-3">Админ-панель</h2>
@@ -174,7 +329,11 @@ ADMIN_TMPL = """
           <div class="list-group-item">
             <div class="d-flex justify-content-between">
               <div>
-                <div class="fw-bold">Заявка #{{ r.ID }} — {{ r.USER_LOGIN }}</div>
+                <div class="fw-bold">
+                   Заявка #{{ r.ID }} — {{ r.USER_LOGIN }}
+                    {% if not r.READ_AT %}<span class="badge text-bg-secondary ms-2">непрочитано</span>{% endif %}
+                    <a class="ms-2 small" href="{{ url_for('admin_discount_view', req_id=r.ID) }}">подробнее →</a>
+                </div>
                 <div class="small text-muted">{{ r.CREATED_AT }}</div>
                 <div class="mt-1">{{ r.MESSAGE or "—" }}</div>
               </div>
@@ -831,7 +990,7 @@ def admin_dashboard():
         """)
         orders = [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
         cur.execute("""
-          SELECT ID, USER_LOGIN, MESSAGE, PERCENT, STATUS, CREATED_AT
+          SELECT ID, USER_LOGIN, MESSAGE, STATUS, CREATED_AT, READ_AT
           FROM DISCOUNT_REQUESTS
           WHERE STATUS='PENDING'
           ORDER BY CREATED_AT DESC
@@ -873,20 +1032,30 @@ def admin_discount_decide(req_id:int):
         cur=conn.cursor()
         if action == "approve":
             pct = int(percent or 0)
+            if pct < 1 or pct > 90:
+                flash("Укажите процент 1–90.", "warning")
+                return redirect(url_for("admin_discount_view", req_id=req_id))
+            cur.execute("SELECT USER_LOGIN FROM DISCOUNT_REQUESTS WHERE ID=:id", {"id": req_id})
+            row = cur.fetchone()
+            if not row:
+                flash("Заявка не найдена.", "warning")
+                return redirect(url_for("admin_dashboard"))
+            ulogin = row[0]
             cur.execute("""
-              UPDATE DISCOUNT_REQUESTS
-              SET STATUS='APPROVED', PERCENT=:p, REVIEWED_AT=SYSTIMESTAMP
-              WHERE ID=:id
-            """, {"p": pct, "id": req_id})
+              INSERT INTO USER_DISCOUNTS (USER_LOGIN, PERCENT, ASSIGNED_BY, REQUEST_ID)
+              VALUES (:u, :p, :by, :rid)
+            """, {"u": ulogin, "p": pct, "by": session.get("user_login","admin"), "rid": req_id})
+            cur.execute("""
+              UPDATE DISCOUNT_REQUESTS SET STATUS='APPROVED', REVIEWED_AT=SYSTIMESTAMP WHERE ID=:id
+            """, {"id": req_id})
         else:
             cur.execute("""
-              UPDATE DISCOUNT_REQUESTS
-              SET STATUS='REJECTED', REVIEWED_AT=SYSTIMESTAMP
-              WHERE ID=:id
+              UPDATE DISCOUNT_REQUESTS SET STATUS='REJECTED', REVIEWED_AT=SYSTIMESTAMP WHERE ID=:id
             """, {"id": req_id})
         conn.commit()
     flash("Решение по заявке сохранено.", "success")
-    return redirect(url_for("admin_dashboard"))
+    return redirect(url_for("admin_discount_view", req_id=req_id))
+
 # ---------------- Маршруты регистрации/входа ----------------
 @app.get("/")
 def index():
